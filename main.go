@@ -338,7 +338,7 @@ func showSelector(matches []TryFolder, query string) *TryFolder {
 	// Create promptui selector with explicit stderr output
 	// This ensures the prompt displays even when stdout is captured
 	prompt := promptui.Select{
-		Label:  fmt.Sprintf("Multiple matches found for '%s'. Select one:", query),
+		Label:  fmt.Sprintf("Multiple matches found for '%s'. Select one", query),
 		Items:  labels,
 		Size:   len(options),
 		Stdin:  os.Stdin,
