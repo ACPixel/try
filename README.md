@@ -6,7 +6,7 @@ A Go implementation of the Ruby `try` utility for quickly creating and navigatin
 
 ## Features
 
-- Create dated folders: `try some name` creates `~/try/2024-01-15-some-name`
+- Create dated folders: `try some name` creates `~/try/2025-10-09-some-name`
 - Fuzzy search: Automatically finds and navigates to existing folders based on name (using [sahilm/fuzzy](https://github.com/sahilm/fuzzy))
 - Tracks usage: SQLite database tracks folder creation dates, open count, and last opened time
 - Smart sorting: Results sorted by last opened time and usage frequency
