@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/manifoldco/promptui"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/sahilm/fuzzy"
 )
@@ -75,20 +76,48 @@ func main() {
 		matches := fuzzySearch(name, folders)
 
 		if len(matches) > 0 {
-			// Use the best match
-			bestMatch := matches[0]
+			var selectedFolder *TryFolder
 
-			// Update times opened
-			bestMatch.TimesOpened++
-			bestMatch.LastOpened = time.Now()
-			if err := updateFolder(db, bestMatch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating folder: %v\n", err)
-				os.Exit(1)
+			// If there are multiple matches, show selector
+			if len(matches) > 1 {
+				selectedFolder = showSelector(matches, name)
+				if selectedFolder == nil {
+					// User selected "create new" or cancelled
+					// Fall through to create new folder
+				} else {
+					// Update times opened
+					selectedFolder.TimesOpened++
+					selectedFolder.LastOpened = time.Now()
+					if err := updateFolder(db, *selectedFolder); err != nil {
+						fmt.Fprintf(os.Stderr, "Error updating folder: %v\n", err)
+						os.Exit(1)
+					}
+
+					// Note: promptui already displays the selected item, so we don't need to print it again
+
+					// Output cd command for shell to eval
+					fmt.Printf("cd %q\n", selectedFolder.Path)
+					return
+				}
+			} else {
+				// Single match, use it directly
+				bestMatch := matches[0]
+
+				// Update times opened
+				bestMatch.TimesOpened++
+				bestMatch.LastOpened = time.Now()
+				if err := updateFolder(db, bestMatch); err != nil {
+					fmt.Fprintf(os.Stderr, "Error updating folder: %v\n", err)
+					os.Exit(1)
+				}
+
+				// Show folder info
+				printFolderInfo(bestMatch)
+
+				// Output cd command for shell to eval
+				fmt.Printf("cd %q\n", bestMatch.Path)
+				return
 			}
-
-			// Output cd command for shell to eval
-			fmt.Printf("cd %q\n", bestMatch.Path)
-			return
 		}
 	}
 
@@ -192,11 +221,6 @@ func fuzzySearch(query string, folders []TryFolder) []TryFolder {
 	}
 
 	// Create a slice of strings for fuzzy matching
-	type folderWithIndex struct {
-		folder TryFolder
-		index  int
-	}
-
 	folderList := make([]string, len(folders))
 	for i, folder := range folders {
 		folderList[i] = folder.Name
@@ -259,17 +283,106 @@ func updateFolder(db *sql.DB, folder TryFolder) error {
 	return err
 }
 
+func showSelector(matches []TryFolder, query string) *TryFolder {
+	// Limit to top 3 matches
+	maxMatches := 3
+	if len(matches) > maxMatches {
+		matches = matches[:maxMatches]
+	}
+
+	// Create options for the selector
+	type option struct {
+		label  string
+		folder *TryFolder
+	}
+
+	options := make([]option, 0, len(matches)+1)
+
+	// Add folder options
+	for i := range matches {
+		folder := &matches[i]
+		label := fmt.Sprintf("%s (%s, opened %d times)", folder.Name, folder.Date, folder.TimesOpened)
+		options = append(options, option{label: label, folder: folder})
+	}
+
+	// Add "create new" option
+	options = append(options, option{label: fmt.Sprintf("Create new: %s", query), folder: nil})
+
+	// Create labels slice for promptui
+	labels := make([]string, len(options))
+	for i, opt := range options {
+		labels[i] = opt.label
+	}
+
+	// Check if we have an interactive terminal
+	// If stdin is not a TTY, we can't show an interactive prompt
+	// In that case, fall back to non-interactive mode
+	if !isTerminal(os.Stdin) {
+		// Non-interactive: print options to stderr and use first match
+		fmt.Fprintf(os.Stderr, "Multiple matches found for '%s':\n", query)
+		for i, opt := range options {
+			marker := " "
+			if i == 0 {
+				marker = "→"
+			}
+			fmt.Fprintf(os.Stderr, "  %s %s\n", marker, opt.label)
+		}
+		fmt.Fprintf(os.Stderr, "Using first match (run directly, not via shell function, for interactive selection)\n")
+		// Return first match (or nil if "create new" is first, which shouldn't happen)
+		if options[0].folder != nil {
+			return options[0].folder
+		}
+		return nil
+	}
+
+	// Create promptui selector with explicit stderr output
+	// This ensures the prompt displays even when stdout is captured
+	prompt := promptui.Select{
+		Label:  fmt.Sprintf("Multiple matches found for '%s'. Select one:", query),
+		Items:  labels,
+		Size:   len(options),
+		Stdin:  os.Stdin,
+		Stdout: os.Stderr, // Write prompt to stderr so it's not captured
+	}
+
+	index, _, err := prompt.Run()
+	if err != nil {
+		// User cancelled (Ctrl+C)
+		os.Exit(1)
+	}
+
+	return options[index].folder
+}
+
+// printFolderInfo displays folder information to stderr
+func printFolderInfo(folder TryFolder) {
+	// ANSI color codes: gray text and reset
+	const gray = "\033[90m"
+	const reset = "\033[0m"
+	const checkmark = "✓"
+	fmt.Fprintf(os.Stderr, "%s%s %s (%s, opened %d times)%s\n", gray, checkmark, folder.Name, folder.Date, folder.TimesOpened, reset)
+}
+
+// isTerminal checks if the given file is a terminal
+func isTerminal(f *os.File) bool {
+	fileInfo, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
 func printShellIntegration() {
 	fmt.Println(`# Try shell integration
 # Add this to your ~/.bashrc or ~/.zshrc:
 
 try() {
     local output
-    output=$(command try "$@" 2>&1)
+    # Only capture stdout for cd command, let stderr through for interactive prompts
+    output=$(command try "$@" 2>/dev/tty)
     if [ $? -eq 0 ]; then
         eval "$output"
     else
-        echo "$output" >&2
         return 1
     fi
 }`)
