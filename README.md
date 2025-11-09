@@ -7,7 +7,7 @@ A Go implementation of the Ruby `try` utility for quickly creating and navigatin
 ## Features
 
 - Create dated folders: `try some name` creates `~/try/2024-01-15-some-name`
-- Fuzzy search: Automatically finds and navigates to existing folders based on name
+- Fuzzy search: Automatically finds and navigates to existing folders based on name (using [sahilm/fuzzy](https://github.com/sahilm/fuzzy))
 - Tracks usage: SQLite database tracks folder creation dates, open count, and last opened time
 - Smart sorting: Results sorted by last opened time and usage frequency
 
@@ -15,12 +15,12 @@ A Go implementation of the Ruby `try` utility for quickly creating and navigatin
 
 Install using Go:
 ```bash
-go install github.com/yourusername/try@latest
+go install github.com/ACPixel/try@latest
 ```
 
 Or clone and build locally:
 ```bash
-git clone <repo>
+git clone https://github.com/ACPixel/try.git
 cd try
 go install
 ```
@@ -78,7 +78,11 @@ try project
 ## Installing from Source
 
 ```bash
-# Install to $GOPATH/bin
+# Clone the repository
+git clone https://github.com/ACPixel/try.git
+cd try
+
+# Install to $GOPATH/bin (or $HOME/go/bin if GOPATH is not set)
 go install
 
 # Or build locally
