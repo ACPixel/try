@@ -14,7 +14,7 @@ A Go implementation of the Ruby `try` utility for quickly creating and navigatin
 - Smart sorting: Results sorted by fuzzy match score, usage frequency, and last opened time
 - List/search folders: `try list` shows recent folders, and `try list api` filters with fuzzy search
 - Prune stale entries: Deleted folders are pruned automatically by default, and `try prune` can run cleanup manually
-- Configurable behavior: use `~/.config/try/config` or environment variables to adjust storage and pruning
+- Configurable behavior: use the interactive `try config` editor, `~/.config/try/config`, or environment variables to adjust storage and pruning
 
 ## Installation
 
@@ -87,15 +87,18 @@ try list proj
 # Clean up database records for deleted folders
 try prune
 
-# Show active config and config file location
+# Edit config interactively
 try config
+
+# Show active config and config file location
+try config show
 ```
 
 ### Configuration
 
 By default, try stores folders and its SQLite database under `~/try`. It also prunes database records for manually deleted folders on every use.
 
-Create `~/.config/try/config` to change defaults:
+Run `try config` to edit settings interactively. You can also create `~/.config/try/config` manually:
 
 ```text
 try_dir = "~/try"
