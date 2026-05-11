@@ -12,6 +12,9 @@ A Go implementation of the Ruby `try` utility for quickly creating and navigatin
 - Informative output: Displays folder name, creation date, and usage count when navigating
 - Tracks usage: SQLite database tracks folder creation dates, open count, and last opened time
 - Smart sorting: Results sorted by fuzzy match score, usage frequency, and last opened time
+- List/search folders: `try list` shows recent folders, and `try list api` filters with fuzzy search
+- Prune stale entries: Deleted folders are pruned automatically by default, and `try prune` can run cleanup manually
+- Configurable behavior: use `~/.config/try/config` or environment variables to adjust storage and pruning
 
 ## Installation
 
@@ -74,6 +77,36 @@ try project
 #     project-b (2024-01-12, opened 3 times)
 #     project-c (2024-01-14, opened 1 times)
 #     Create new: project
+
+# List recent tries
+try list
+
+# Fuzzy-filter the list
+try list proj
+
+# Clean up database records for deleted folders
+try prune
+
+# Show active config and config file location
+try config
+```
+
+### Configuration
+
+By default, try stores folders and its SQLite database under `~/try`. It also prunes database records for manually deleted folders on every use.
+
+Create `~/.config/try/config` to change defaults:
+
+```text
+try_dir = "~/try"
+prune_on_use = true
+```
+
+Environment variables override the config file, which is useful for one-off commands or scripts:
+
+```bash
+export TRY_DIR="$HOME/work/tries"
+export TRY_PRUNE_ON_USE=false
 ```
 
 ## How it works
@@ -81,9 +114,10 @@ try project
 1. The Go binary searches the database for existing folders matching your query using fuzzy search
 2. If a single match is found, it displays folder info, updates usage stats, and outputs `cd "path"`
 3. If multiple matches are found, it shows an interactive selector with the top 3 matches and a "create new" option
-4. If no match is found, it creates a new dated folder and outputs `cd "path"`
+4. If no match is found, it creates a new dated folder with a normalized slug and outputs `cd "path"`
 5. The shell function wraps the binary and `eval`s the output to change directory
 6. Folder information (name, date, usage count) is displayed in gray with a checkmark for easy identification
+7. The database schema is versioned with `schema_migrations`; databases without that table are treated as v0 and migrated automatically
 
 ## Installing from Source
 
@@ -107,4 +141,4 @@ The SQLite database is stored at `~/try/try.db` and tracks:
 - Creation dates
 - Times opened
 - Last opened timestamp
-
+- Schema version

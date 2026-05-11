@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,9 +16,13 @@ import (
 )
 
 const (
-	tryDir     = "~/try"
-	dbFileName = "try.db"
+	tryDir               = "~/try"
+	configFile           = "~/.config/try/config"
+	dbFileName           = "try.db"
+	currentSchemaVersion = 1
 )
+
+var nonSlugChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 type TryFolder struct {
 	ID          int
@@ -29,22 +34,34 @@ type TryFolder struct {
 	LastOpened  time.Time
 }
 
+type Config struct {
+	TryDir     string
+	PruneOnUse bool
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: try <name>\n")
-		fmt.Fprintf(os.Stderr, "       try init   (show shell integration)\n")
+		printUsage(os.Stderr)
 		os.Exit(1)
 	}
 
-	// Handle init command to show shell integration
-	if os.Args[1] == "init" {
+	command := os.Args[1]
+	switch command {
+	case "help", "--help", "-h":
+		printUsage(os.Stderr)
+		return
+	case "init":
 		printShellIntegration()
 		return
 	}
 
-	name := strings.Join(os.Args[1:], " ")
+	config, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
+		os.Exit(1)
+	}
 
-	tryBaseDir, err := expandHomeDir(tryDir)
+	tryBaseDir, err := getTryBaseDir(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error expanding home directory: %v\n", err)
 		os.Exit(1)
@@ -63,6 +80,34 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	if config.PruneOnUse && command != "prune" && command != "clean" {
+		if err := pruneMissingFolders(db, false); err != nil {
+			fmt.Fprintf(os.Stderr, "Error pruning folders: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	switch command {
+	case "list", "ls":
+		query := strings.Join(os.Args[2:], " ")
+		if err := listFolders(db, query); err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing folders: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	case "config":
+		printConfigInfo(config)
+		return
+	case "prune", "clean":
+		if err := pruneMissingFolders(db, true); err != nil {
+			fmt.Fprintf(os.Stderr, "Error pruning folders: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	name := strings.Join(os.Args[1:], " ")
 
 	// Check if folder with this name already exists (fuzzy search)
 	folders, err := getAllFolders(db)
@@ -123,7 +168,7 @@ func main() {
 
 	// Create new folder
 	today := time.Now().Format("2006-01-02")
-	folderName := fmt.Sprintf("%s-%s", today, name)
+	folderName := fmt.Sprintf("%s-%s", today, slugifyName(name))
 	folderPath := filepath.Join(tryBaseDir, folderName)
 
 	if err := os.MkdirAll(folderPath, 0755); err != nil {
@@ -161,12 +206,160 @@ func expandHomeDir(path string) (string, error) {
 	return path, nil
 }
 
+func defaultConfig() Config {
+	return Config{
+		TryDir:     tryDir,
+		PruneOnUse: true,
+	}
+}
+
+func loadConfig() (Config, error) {
+	config := defaultConfig()
+	path, err := expandHomeDir(configFile)
+	if err != nil {
+		return config, err
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config, applyEnvOverrides(&config)
+		}
+		return config, err
+	}
+
+	for lineNumber, rawLine := range strings.Split(string(contents), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return config, fmt.Errorf("%s:%d: expected key = value", path, lineNumber+1)
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+
+		switch key {
+		case "try_dir":
+			if value != "" {
+				config.TryDir = value
+			}
+		case "prune_on_use":
+			parsed, err := parseBool(value)
+			if err != nil {
+				return config, fmt.Errorf("%s:%d: %w", path, lineNumber+1, err)
+			}
+			config.PruneOnUse = parsed
+		default:
+			return config, fmt.Errorf("%s:%d: unknown config key %q", path, lineNumber+1, key)
+		}
+	}
+
+	return config, applyEnvOverrides(&config)
+}
+
+func applyEnvOverrides(config *Config) error {
+	if dir := os.Getenv("TRY_DIR"); dir != "" {
+		config.TryDir = dir
+	}
+	if prune := os.Getenv("TRY_PRUNE_ON_USE"); prune != "" {
+		parsed, err := parseBool(prune)
+		if err != nil {
+			return fmt.Errorf("TRY_PRUNE_ON_USE: %w", err)
+		}
+		config.PruneOnUse = parsed
+	}
+	return nil
+}
+
+func parseBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("expected boolean, got %q", value)
+	}
+}
+
+func getTryBaseDir(config Config) (string, error) {
+	return expandHomeDir(config.TryDir)
+}
+
+func slugifyName(name string) string {
+	slug := strings.Trim(nonSlugChars.ReplaceAllString(strings.TrimSpace(name), "-"), "-")
+	if slug == "" {
+		return "untitled"
+	}
+	return slug
+}
+
 func initDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
+	if err := migrateDB(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
 
+func migrateDB(db *sql.DB) error {
+	version, err := schemaVersion(db)
+	if err != nil {
+		return err
+	}
+
+	if version > currentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this try version supports (%d)", version, currentSchemaVersion)
+	}
+
+	if version < 1 {
+		if err := migrateToV1(db); err != nil {
+			return err
+		}
+		version = 1
+	}
+
+	return nil
+}
+
+func schemaVersion(db *sql.DB) (int, error) {
+	exists, err := tableExists(db, "schema_migrations")
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, nil
+	}
+
+	var version int
+	err = db.QueryRow(`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return version, err
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func migrateToV1(db *sql.DB) error {
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS folders (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,11 +372,38 @@ func initDB(dbPath string) (*sql.DB, error) {
 	);
 	`
 
-	if _, err := db.Exec(createTableSQL); err != nil {
-		return nil, err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
 	}
 
-	return db, nil
+	if _, err := tx.Exec(createTableSQL); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+	`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		INSERT OR REPLACE INTO schema_migrations (version, applied_at)
+		VALUES (?, ?);
+	`, currentSchemaVersion, time.Now().Format(time.RFC3339)); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func getAllFolders(db *sql.DB) ([]TryFolder, error) {
@@ -283,6 +503,71 @@ func updateFolder(db *sql.DB, folder TryFolder) error {
 	return err
 }
 
+func deleteFolderRecord(db *sql.DB, id int) error {
+	_, err := db.Exec(`DELETE FROM folders WHERE id = ?`, id)
+	return err
+}
+
+func listFolders(db *sql.DB, query string) error {
+	folders, err := getAllFolders(db)
+	if err != nil {
+		return err
+	}
+
+	if query != "" {
+		folders = fuzzySearch(query, folders)
+	}
+
+	if len(folders) == 0 {
+		if query == "" {
+			fmt.Fprintln(os.Stderr, "No try folders yet. Create one with: try <name>")
+		} else {
+			fmt.Fprintf(os.Stderr, "No try folders match %q.\n", query)
+		}
+		return nil
+	}
+
+	for _, folder := range folders {
+		fmt.Fprintf(os.Stderr, "%s  %s  opened %d  %s\n", folder.Date, folder.Name, folder.TimesOpened, folder.Path)
+	}
+	return nil
+}
+
+func pruneMissingFolders(db *sql.DB, verbose bool) error {
+	folders, err := getAllFolders(db)
+	if err != nil {
+		return err
+	}
+
+	removed := 0
+	for _, folder := range folders {
+		if _, err := os.Stat(folder.Path); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		if err := deleteFolderRecord(db, folder.ID); err != nil {
+			return err
+		}
+		removed++
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Pruned missing folder: %s\n", folder.Path)
+		}
+	}
+
+	if !verbose {
+		return nil
+	}
+
+	if removed == 0 {
+		fmt.Fprintln(os.Stderr, "No missing try folders found.")
+	} else {
+		fmt.Fprintf(os.Stderr, "Pruned %d missing try folder(s).\n", removed)
+	}
+	return nil
+}
+
 func showSelector(matches []TryFolder, query string) *TryFolder {
 	// Limit to top 3 matches
 	maxMatches := 3
@@ -370,6 +655,37 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+func printUsage(output *os.File) {
+	fmt.Fprintln(output, `Usage:
+  try <name>          Create or jump to a try folder
+  try list [query]    List recent folders, optionally filtered
+  try prune           Remove database entries for deleted folders
+  try config          Show config file location and defaults
+  try init            Print shell integration
+  try help            Show this help
+
+Environment:
+  TRY_DIR             Override the base folder (default: ~/try)
+  TRY_PRUNE_ON_USE    Override automatic pruning (true/false)`)
+}
+
+func printConfigInfo(config Config) {
+	path, err := expandHomeDir(configFile)
+	if err != nil {
+		path = configFile
+	}
+	fmt.Fprintf(os.Stderr, `Config file: %s
+
+Current config:
+  try_dir = %q
+  prune_on_use = %t
+
+Example config:
+  try_dir = "~/try"
+  prune_on_use = true
+`, path, config.TryDir, config.PruneOnUse)
 }
 
 func printShellIntegration() {
